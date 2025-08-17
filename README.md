@@ -43,7 +43,7 @@ Proyek ini bertujuan untuk merekonstruksi model 3D dari input yang diberikan. Me
 4. Jalankan proyek:
 
    ```bash
-   python main.py
+   uvicorn --main:app
    ```
 
 ## Cara Berkontribusi 🤝
@@ -61,3 +61,4 @@ Lisensi proyek tidak disebutkan.
 
 ---
 README.md ini dihasilkan secara otomatis oleh [README.MD Generator](https://github.com/emRival) — dibuat dengan ❤️ oleh [emRival](https://github.com/emRival)
+
