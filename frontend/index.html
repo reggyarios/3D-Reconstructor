@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>3D Reconstructor & Voxelizer</title>
+  <link href="style.css" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&display=swap" rel="stylesheet" />
+</head>
+<body>
+  <div class="sidebar">
+    <h1>Squareclouds</h1>
+    
+    <div id="reconstructionDiv">
+        <h3>Tahap 1: Rekonstruksi 3D</h3>
+        <form id="reconstructForm">
+            <div class="upload-box" id="uploadBox">
+                <label for="imageInput">Klik untuk unggah gambar</label>
+                <input type="file" id="imageInput" accept="image/*" required style="display:none"/>
+                <img id="imagePreview" style="display:none;" />
+            </div>
+            <div class="control-group">
+                <label for="resolution">Resolusi Model: <span id="resolutionValue">256</span></label>
+                <input type="range" id="resolution" min="32" max="512" step="32" value="256" />
+            </div>
+            <div class="control-group">
+                <label><input type="checkbox" id="removeBg" checked /> Hapus Latar Belakang</label>
+            </div>
+            <button type="submit" class="btn" id="generateBtn">Generate Model 3D</button>
+        </form>
+    </div>
+    
+    <div id="voxelizationDiv" style="display:none;">
+      <h3>Tahap 2: Vokselisasi</h3>
+      <div class="control-group">
+        <label for="maxBlocks">Ukuran Maks (Blok): <span id="maxBlocksValue">128</span></label>
+        <input type="range" id="maxBlocks" min="16" max="380" step="16" value="128" />
+      </div>
+      <div class="control-group">
+        <label><input type="checkbox" id="fillInterior" checked> Isi Bagian Dalam</label>
+      </div>
+      <button id="voxelizeBtn" class="btn">Voxelize Model</button>
+    </div>
+
+    <div id="blockAssignerDiv" style="display:none;">
+      <h3>Tahap 3: Pemetaan Blok</h3>
+      <button id="mapBtn" class="btn">Assign Blocks to Voxels</button>
+    </div>
+
+    <div id="exporterDiv" style="display:none;">
+      <h3>Tahap 4: Export & Pratinjau</h3>
+       <div class="control-group">
+          <label>Mode Pratinjau:</label>
+          <div class="btn-group">
+              <button class="preview-btn" id="previewSolidBtn">Warna Solid</button>
+              <button class="preview-btn" id="previewTextureBtn">Tekstur Blok</button>
+          </div>
+      </div>
+      <div class="btn-group">
+        <button id="downloadSchemBtn" class="btn">Unduh .schem</button>
+        <!-- PERBAIKAN: Tombol Litematic disembunyikan karena fungsinya belum ada di backend -->
+        <button id="downloadLitematicBtn" class="btn" style="display: none;">Unduh .litematic</button>
+      </div>
+    </div>
+    <div class="spinner" id="spinner"></div>
+  </div>
+
+  <div id="viewer"></div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+    import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+    const elements = {
+        reconstructForm: document.getElementById('reconstructForm'),
+        generateBtn: document.getElementById('generateBtn'),
+        imageInput: document.getElementById('imageInput'),
+        imagePreview: document.getElementById('imagePreview'),
+        uploadBox: document.getElementById('uploadBox'),
+        resolutionSlider: document.getElementById('resolution'),
+        resolutionValue: document.getElementById('resolutionValue'),
+        removeBgCheckbox: document.getElementById('removeBg'),
+        voxelizeBtn: document.getElementById('voxelizeBtn'),
+        maxBlocksSlider: document.getElementById('maxBlocks'),
+        maxBlocksValue: document.getElementById('maxBlocksValue'),
+        fillInteriorCheckbox: document.getElementById('fillInterior'),
+        mapBtn: document.getElementById('mapBtn'),
+        previewSolidBtn: document.getElementById('previewSolidBtn'),
+        previewTextureBtn: document.getElementById('previewTextureBtn'),
+        downloadSchemBtn: document.getElementById('downloadSchemBtn'),
+        downloadLitematicBtn: document.getElementById('downloadLitematicBtn'),
+        spinner: document.getElementById('spinner'),
+        reconstructionDiv: document.getElementById('reconstructionDiv'),
+        voxelizationDiv: document.getElementById('voxelizationDiv'),
+        blockAssignerDiv: document.getElementById('blockAssignerDiv'),
+        exporterDiv: document.getElementById('exporterDiv'),
+    };
+    
+    let renderer, scene, camera, controls;
+    let currentObject = null;
+    let sessionData = { id: null, voxelPreviewUrl: null, blockNamesPreviewUrl: null };
+    let blockAtlas = { texture: null, uvMap: {}, atlasSize: 0 };
+    let currentPreviewMode = 'solid';
+
+    async function loadBlockAtlasData() {
+        try {
+            const [atlasResponse, texture] = await Promise.all([
+                fetch('/assets/processed_atlas.json'), // Menggunakan atlas yang sudah diproses
+                new THREE.TextureLoader().loadAsync('/assets/vanilla.png')
+            ]);
+            if (!atlasResponse.ok) throw new Error('Gagal memuat processed_atlas.json');
+            
+            const atlasData = await atlasResponse.json();
+            
+            blockAtlas.atlasSize = atlasData.atlasSize; 
+            blockAtlas.uvMap = atlasData.uvMap; // Langsung gunakan uvMap dari JSON
+
+            blockAtlas.texture = texture;
+            blockAtlas.texture.magFilter = THREE.NearestFilter;
+            blockAtlas.texture.minFilter = THREE.NearestFilter;
+            console.log("Aset atlas blok berhasil dimuat.");
+
+        } catch (error) {
+            console.error("Kesalahan saat memuat aset atlas:", error);
+            alert("Gagal memuat aset penting untuk pratinjau tekstur.");
+        }
+    }
+
+    function initViewer() {
+      const container = document.getElementById('viewer');
+      renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(renderer.domElement);
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xf0f4f8);
+      camera = new THREE.PerspectiveCamera(50, container.clientWidth / container.clientHeight, 0.1, 2000);
+      camera.position.set(0, 1, 3.5);
+      controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+      scene.add(new THREE.AmbientLight(0xffffff, 1.8));
+      const dirLight = new THREE.DirectionalLight(0xffffff, 2.5);
+      dirLight.position.set(5, 10, 7.5);
+      scene.add(dirLight);
+      scene.add(new THREE.GridHelper(10, 20, 0xcccccc, 0xcccccc));
+      const animate = () => { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); };
+      animate();
+    }
+    
+    function initEventListeners() {
+        elements.resolutionSlider.addEventListener('input', (e) => { elements.resolutionValue.textContent = e.target.value; });
+        elements.maxBlocksSlider.addEventListener('input', (e) => { elements.maxBlocksValue.textContent = e.target.value; });
+        elements.uploadBox.addEventListener('click', () => elements.imageInput.click());
+        elements.imageInput.addEventListener('change', () => {
+            if (elements.imageInput.files[0]) {
+                elements.imagePreview.src = URL.createObjectURL(elements.imageInput.files[0]);
+                elements.imagePreview.style.display = 'block';
+                elements.uploadBox.querySelector('label').style.display = 'none';
+                resetToStage(1);
+            }
+        });
+        elements.reconstructForm.addEventListener('submit', handleReconstruct);
+        elements.voxelizeBtn.addEventListener('click', handleVoxelize);
+        elements.mapBtn.addEventListener('click', handleMapBlocks);
+        elements.downloadSchemBtn.addEventListener('click', () => handleExport('schem'));
+        // elements.downloadLitematicBtn.addEventListener('click', () => handleExport('litematic')); // Dinonaktifkan
+        elements.previewSolidBtn.addEventListener('click', () => handlePreviewToggle('solid'));
+        elements.previewTextureBtn.addEventListener('click', () => handlePreviewToggle('texture'));
+    }
+
+    async function handleReconstruct(e) {
+        e.preventDefault();
+        if (!elements.imageInput.files.length) return alert("Pilih gambar terlebih dahulu!");
+        
+        const btn = elements.generateBtn;
+        const originalText = btn.textContent;
+        setLoading(true, btn, 'Merekonstruksi...');
+        
+        try {
+            const formData = new FormData();
+            formData.append('image', elements.imageInput.files[0]);
+            formData.append('remove_bg', elements.removeBgCheckbox.checked);
+            formData.append('resolution', elements.resolutionSlider.value);
+            const res = await fetchWithApiError('/reconstruct', { method: 'POST', body: formData });
+            const data = await res.json();
+            sessionData.id = data.sessionId;
+            await loadModel(data.objUrl, data.textureUrl);
+            resetToStage(2);
+        } catch (err) {
+            alert(`Rekonstruksi Gagal: ${err.message}`);
+        } finally {
+            setLoading(false, btn, originalText);
+        }
+    }
+
+    async function handleVoxelize() {
+        const btn = elements.voxelizeBtn;
+        const originalText = btn.textContent;
+        setLoading(true, btn, 'Memproses Voxel...');
+        
+        try {
+            const payload = { sessionId: sessionData.id, max_blocks: parseInt(elements.maxBlocksSlider.value), fill: elements.fillInteriorCheckbox.checked };
+            const res = await fetchWithApiError('/voxelize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const voxData = await res.json();
+            sessionData.voxelPreviewUrl = voxData.voxelPreviewUrl;
+            await renderSolidColorVoxel();
+            resetToStage(3);
+        } catch(err) {
+            alert(`Voxelize Gagal: ${err.message}`);
+        } finally {
+            setLoading(false, btn, originalText);
+        }
+    }
+
+    async function handleMapBlocks() {
+        const btn = elements.mapBtn;
+        const originalText = btn.textContent;
+        setLoading(true, btn, 'Memetakan Blok...');
+
+        try {
+            const payload = { sessionId: sessionData.id };
+            const res = await fetchWithApiError('/map-blocks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            const mapData = await res.json();
+            sessionData.blockNamesPreviewUrl = mapData.blockNamesPreviewUrl;
+            
+            await handlePreviewToggle('texture');
+            resetToStage(4);
+        } catch(err) {
+            alert(`Pemetaan Gagal: ${err.message}`);
+        } finally {
+            setLoading(false, btn, originalText);
+        }
+    }
+
+    async function handleExport(format) {
+        const btn = format === 'schem' ? elements.downloadSchemBtn : elements.downloadLitematicBtn;
+        const originalText = btn.textContent;
+        setLoading(true, btn, 'Mengekspor...');
+
+        try {
+            const endpoint = format === 'schem' ? '/export-schematic' : '/export-litematic';
+            const res = await fetchWithApiError(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: sessionData.id }) });
+            const data = await res.json();
+            const link = document.createElement('a');
+            link.href = data.downloadUrl;
+            link.setAttribute('download', `model_${sessionData.id.substring(0,8)}.${format}`);
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+        } catch (err) {
+            alert(`Ekspor Gagal: ${err.message}`);
+        } finally {
+            setLoading(false, btn, originalText);
+        }
+    }
+    
+    async function handlePreviewToggle(mode) {
+        if (currentPreviewMode === mode && currentObject) return;
+
+        elements.previewSolidBtn.classList.toggle('active', mode === 'solid');
+        elements.previewTextureBtn.classList.toggle('active', mode === 'texture');
+        currentPreviewMode = mode;
+        setLoading(true);
+
+        try {
+            if (mode === 'texture') {
+                if (!sessionData.blockNamesPreviewUrl) {
+                    alert("Jalankan 'Assign Blocks' terlebih dahulu untuk melihat pratinjau tekstur.");
+                    handlePreviewToggle('solid'); // Fallback to solid
+                    return;
+                }
+                await renderTextureVoxel();
+            } else {
+                await renderSolidColorVoxel();
+            }
+        } catch (err) {
+            alert(`Gagal mengubah pratinjau: ${err.message}`);
+        } finally {
+             setLoading(false);
+        }
+    }
+
+    function setLoading(isLoading, button = null, text = '') {
+        elements.spinner.style.display = isLoading ? 'block' : 'none';
+        if (button) {
+            button.disabled = isLoading;
+            if (text) button.textContent = text;
+        }
+    }
+
+    async function fetchWithApiError(url, options) {
+        const response = await fetch(url, options);
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: "Respons server tidak valid." }));
+            throw new Error(errorData.detail || "Terjadi kesalahan tidak diketahui.");
+        }
+        return response;
+    }
+    
+    function resetToStage(stage) {
+        elements.voxelizationDiv.style.display = stage >= 2 ? 'block' : 'none';
+        elements.blockAssignerDiv.style.display = stage >= 3 ? 'block' : 'none';
+        elements.exporterDiv.style.display = stage >= 4 ? 'block' : 'none';
+        
+        if (stage === 1) {
+            clearScene();
+        }
+        if (stage <= 2) {
+            sessionData.voxelPreviewUrl = null;
+        }
+        if (stage <= 3) {
+            sessionData.blockNamesPreviewUrl = null;
+            elements.previewSolidBtn.classList.remove('active');
+            elements.previewTextureBtn.classList.remove('active');
+        }
+    }
+
+    function clearScene() {
+      if(currentObject) {
+        scene.remove(currentObject);
+        currentObject.traverse(child => {
+          if(child.isMesh) {
+            child.geometry.dispose();
+            if (Array.isArray(child.material)) {
+                child.material.forEach(m => { if (m.map) m.map.dispose(); m.dispose(); });
+            } else if (child.material) {
+                if (child.material.map) child.material.map.dispose();
+                child.material.dispose();
+            }
+          }
+        });
+      }
+      currentObject = null;
+    }
+
+    async function loadModel(objUrl, textureUrl) {
+        clearScene();
+        setLoading(true);
+        const [obj, texture] = await Promise.all([new OBJLoader().loadAsync(objUrl), new THREE.TextureLoader().loadAsync(textureUrl)]);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        obj.traverse(child => { if (child.isMesh) child.material = new THREE.MeshStandardMaterial({ map: texture }); });
+        const box = new THREE.Box3().setFromObject(obj);
+        const size = box.getSize(new THREE.Vector3());
+        const scale = 2.0 / Math.max(size.x, size.y, size.z);
+        obj.scale.setScalar(scale);
+        const newBox = new THREE.Box3().setFromObject(obj);
+        const center = newBox.getCenter(new THREE.Vector3());
+        obj.position.sub(center);
+        scene.add(obj);
+        currentObject = obj;
+        setLoading(false);
+    }
+
+    async function renderSolidColorVoxel() {
+        if (!sessionData.voxelPreviewUrl) return;
+        const res = await fetchWithApiError(sessionData.voxelPreviewUrl);
+        const grid = await res.json();
+        clearScene();
+        if (!grid || grid.length === 0) return;
+        
+        const [nx, ny, nz] = [grid.length, grid[0].length, grid[0][0].length];
+        const boxSize = 2.0 / Math.max(nx, ny, nz);
+        const geometriesByColor = new Map();
+        const baseGeo = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
+
+        for (let x = 0; x < nx; x++) for (let y = 0; y < ny; y++) for (let z = 0; z < nz; z++) {
+            const c = grid[x][y][z];
+            if (c[0] === 0 && c[1] === 0 && c[2] === 0) continue;
+            
+            const colorHex = (c[0] << 16) | (c[1] << 8) | c[2];
+            const geo = baseGeo.clone();
+            geo.translate((x - nx/2 + 0.5)*boxSize, (y - ny/2 + 0.5)*boxSize, (z - nz/2 + 0.5)*boxSize);
+            
+            if (!geometriesByColor.has(colorHex)) geometriesByColor.set(colorHex, []);
+            geometriesByColor.get(colorHex).push(geo);
+        }
+
+        const group = new THREE.Group();
+        for (const [color, geometries] of geometriesByColor.entries()) {
+            if (geometries.length > 0) {
+                const merged = mergeGeometries(geometries);
+                const mat = new THREE.MeshStandardMaterial({ color: color });
+                group.add(new THREE.Mesh(merged, mat));
+            }
+        }
+        scene.add(group);
+        currentObject = group;
+    }
+
+    async function renderTextureVoxel() {
+        if (!sessionData.blockNamesPreviewUrl || !blockAtlas.texture) return;
+        const res = await fetchWithApiError(sessionData.blockNamesPreviewUrl);
+        const blockGrid = await res.json();
+        clearScene();
+        if (!blockGrid || blockGrid.length === 0) return;
+
+        const [nx, ny, nz] = [blockGrid.length, blockGrid[0].length, blockGrid[0][0].length];
+        const boxSize = 2.0 / Math.max(nx, ny, nz);
+        
+        const geometriesByBlock = {};
+        const materialCache = {};
+
+        for (let x = 0; x < nx; x++) {
+            for (let y = 0; y < ny; y++) {
+                for (let z = 0; z < nz; z++) {
+                    const blockNameRaw = blockGrid[x][y][z];
+                    if (blockNameRaw === 'minecraft:air') continue;
+                    
+                    const blockName = blockNameRaw; // Gunakan nama lengkap
+                    
+                    if (!geometriesByBlock[blockName]) {
+                        geometriesByBlock[blockName] = [];
+                    }
+
+                    const geo = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
+                    geo.translate(
+                        (x - nx/2 + 0.5) * boxSize,
+                        (y - ny/2 + 0.5) * boxSize,
+                        (z - nz/2 + 0.5) * boxSize
+                    );
+                    geometriesByBlock[blockName].push(geo);
+                }
+            }
+        }
+        
+        const finalGroup = new THREE.Group();
+
+        for (const blockName in geometriesByBlock) {
+            const geometries = geometriesByBlock[blockName];
+            if (geometries.length === 0) continue;
+
+            const mergedGeometry = mergeGeometries(geometries);
+            
+            let material;
+            if (materialCache[blockName]) {
+                material = materialCache[blockName];
+            } else {
+                const uvData = blockAtlas.uvMap[blockName] || blockAtlas.uvMap['minecraft:stone']; // Fallback
+                const tileX = uvData.x;
+                const tileY = uvData.y;
+
+                const textureSize = 1.0 / blockAtlas.atlasSize;
+                const u0 = tileX * textureSize;
+                const v0 = 1.0 - (tileY + 1) * textureSize;
+                
+                const texture = blockAtlas.texture.clone();
+                texture.needsUpdate = true;
+                texture.offset.set(u0, v0);
+                texture.repeat.set(textureSize, textureSize);
+
+                material = new THREE.MeshStandardMaterial({ map: texture });
+                materialCache[blockName] = material;
+            }
+
+            const mesh = new THREE.Mesh(mergedGeometry, material);
+            finalGroup.add(mesh);
+        }
+        
+        scene.add(finalGroup);
+        currentObject = finalGroup;
+    }
+    
+    window.addEventListener('resize', () => {
+        if (!renderer || !camera) return;
+        const container = document.getElementById('viewer');
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    async function init() {
+        initViewer();
+        initEventListeners();
+        await loadBlockAtlasData();
+        resetToStage(1);
+    }
+
+    init();
+  </script>
+</body>
+</html>
